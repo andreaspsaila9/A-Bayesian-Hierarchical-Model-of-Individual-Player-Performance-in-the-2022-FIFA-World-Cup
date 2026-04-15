@@ -34,6 +34,8 @@ df_model <- df %>%
   mutate(
     player_id = as.numeric(factor(player)),               # converts player name into numeric ID
     team_id   = as.numeric(factor(team)),                 # converts team name into numeric ID
+    tau       = minutes_90s,              # total minutes in 90-min units
+    tau_star  = minutes_90s / games,    # avg minutes per match in 90-min units
     minutes_90 = minutes_90s,                             # minutes per 90 for all players since some players played less
     is_DF = ifelse(position.x == "DF", 1, 0),             # dummy for defenders
     is_MF = ifelse(position.x == "MF", 1, 0)              # dummy for midfielders (FW is baseline by elimination)
@@ -76,13 +78,17 @@ hist(df_defmid$interceptions,
 # Now N_teams will be a proper integer
 N_teams <- ncol(delta_defmid)
 
-# Rebuild the JAGS data list 
-data_jags_int_poi <- list(
+
+# ---------------------------- POISSON INTERCEPTIONS (CENTERED)
+
+# 2) JAGS data
+data_jags_int <- list(
   y_int     = df_defmid$interceptions,
-  minutes   = df_defmid$minutes_90,
   player_id = df_defmid$defmid_player_id,
   team_id   = df_defmid$team_id,
   delta     = delta_defmid,
+  tau       = df_defmid$minutes_90,
+  tau_star = df_defmid$tau_star,
   N         = nrow(df_defmid),
   N_players = max(df_defmid$defmid_player_id),
   N_teams   = ncol(delta_defmid)
@@ -90,99 +96,114 @@ data_jags_int_poi <- list(
 
 model_pois_int <- "
 model {
-
-  # Player interception ability (defenders and midfielders) (centred)
+  
+  # Priors on player effects
   for (p in 1:N_players) {
-    Delta_raw[p] ~ dnorm(0, 1)
+    Delta_star[p] ~ dnorm(m, s)
+    #trick to sum-to-zero constraints
+    Delta[p] <- Delta_star[p] - mean(Delta_star[])
   }
-   mean_Delta <- mean(Delta_raw[]) 
-  for (p in 1:N_players) {
-    Delta[p] <- Delta_raw[p] - mean_Delta
-  }
-
-
-  # Team defense - interceptions (centred)
-for (k in 1:N_teams) {
-    team_int_raw[k] ~ dnorm(0, 1)
-  }
-  mean_team_int <- mean(team_int_raw[])
+  
+  # Priors on team effects
   for (k in 1:N_teams) {
-    lambda_team_int[k] <- team_int_raw[k] - mean_team_int
+    
+    lambda_e_star[k] ~ dnorm(mu.lambda_e, tau.lambda_e)  # like team effects in whitaker and baio and blangiardo
+    lambda_Edive_star[k] ~ dnorm(mu.lambda_Edive, tau.lambda_Edive) # like team effects in whitaker and baio and blangiardo
+    
+    # sum-to-zero constraints
+    lambda_e[k] <- lambda_e_star[k] - mean(lambda_e_star[])
+    lambda_Edive[k] <- lambda_Edive_star[k] - mean(lambda_Edive_star[])
   }
-
-
-  # Opponent attacking quality (centered)
-  for (k in 1:N_teams) {
-    opp_att_raw[k] ~ dnorm(0, 1)
-  }
-  mean_opp_att <- mean(opp_att_raw[])
-  for (k in 1:N_teams) {
-    lambda_opp_att[k] <- opp_att_raw[k] - mean_opp_att
-  }
+  
+  # baio and blangiardo impose sum-to-zero constraints to their team effects, so:
   
   # Likelihood
   for (i in 1:N) {
     
-    # opponent sum
-  opponent_sum[i] <- inprod(lambda_opp_att[], delta[i,])
-
-    # linear predictor for interception rate
-    eta[i] <- Delta[player_id[i]] +
-              lambda_team_int[team_id[i]] +
-              opponent_sum[i]  #(stronger opponent attack quality, more interceptions for defending team, mention in thesis)
-
-    # exposure offset - account for minutes
-    log(mu[i]) <- log(minutes[i]) + eta[i]
+    y_int[i] ~ dpois(eta[i] * tau[i])
     
-  # observation
-  y_int[i] ~ dpois(mu[i])
-
-   
+    opp_sum[i] <- inprod(lambda_Edive[], delta[i,]) # total opponent ability
+    
+    log(eta[i]) <- Delta[player_id[i]] +
+      tau[i] * lambda_e[team_id[i]] -
+      tau_star[i] * opp_sum[i]
   }
-
+  # inspired by Baio and Blangiardo code, priors in the random effects
+  m~dnorm(0,0.0001)
+  s~dgamma(0.1,0.01) # controls spread of player effects
+  
+  # priors on the random effects
+  mu.lambda_e ~ dnorm(0,0.0001)
+  mu.lambda_Edive ~ dnorm(0,0.0001) # mean 0 with precision very small and weak, we do not 
+  # know anything about team effects apart from the fact that they 
+  # are around zero, but very weakly-informative
+  tau.lambda_e ~ dgamma(.01,.01)
+  tau.lambda_Edive ~ dgamma(.01,.01)
+  # priors are very broad, we let the data decide if teams are similar or different
 }
 "
 
 jags_model_int_poi <- jags.model(
   textConnection(model_pois_int),
-  data = data_jags_int_poi,
+  data = data_jags_int,
   n.chains = 3,
-  n.adapt = 420 
+  n.adapt = 1000 #1000
 )
 
-update(jags_model_int_poi, 4200)  
+update(jags_model_int_poi, 9000) #9000?
 
-params_int_poi <- c("Delta", "lambda_team_int", "lambda_opp_att")
+params_int_poi <- c(
+  "Delta", "lambda_e", "lambda_Edive",
+  "tau.lambda_e", "tau.lambda_Edive" # "mu.lambda_e", "mu.lambda_Edive","m", "s"
+)
 
-samples_int_poi <- coda.samples(jags_model_int_poi, variable.names = params_int_poi, n.iter = 30000, thin = 1) 
-# 6) Summaries + defender ability table
-summary_stats_int  <- summary(samples_int_poi)$statistics
-summary_quants_int <- summary(samples_int_poi)$quantiles
+samples_int_poi <- coda.samples(
+  jags_model_int_poi,
+  variable.names = params_int_poi,
+  n.iter = 40000, # 40000?
+  thin = 1
+)
 
-Delta_idx <- grep("^Delta\\[", rownames(summary_stats_int))
-Delta_stats <- summary_stats_int[Delta_idx, ]
+# player ability table (Poisson interceptions)
+sum_stats_int_poi <- summary(samples_int_poi)$statistics
+sum_quants_int_poi <- summary(samples_int_poi)$quantiles
+
+Delta_idx_int <- grep("^Delta\\[", rownames(sum_stats_int_poi))
+Delta_stats_int <- sum_stats_int_poi[Delta_idx_int, ]
 
 player_lookup_defmid <- df_defmid %>%
   distinct(defmid_player_id, player) %>%
   arrange(defmid_player_id)
 
+# player_table_poisson_int <- data.frame(
+#  player        = player_lookup_defmid$player,
+#  ability_mean  = Delta_stats_int[, "Mean"],
+# ability_sd    = Delta_stats_int[, "SD"],
+#ability_lower = sum_quants_int_poi[Delta_idx_int, "2.5%"],
+#ability_upper = sum_quants_int_poi[Delta_idx_int, "97.5%"]
+# )
+
+
+samples_int_poi_mcmc <- as.mcmc(as.matrix(samples_int_poi))
+
+Delta_hpd_poi_int <- HPDinterval(samples_int_poi_mcmc, prob = 0.95)
+Delta_hpd_poi_int <- Delta_hpd_poi_int[grep("^Delta\\[", rownames(Delta_hpd_poi_int)), ]
+
 player_table_poisson_int <- data.frame(
   player        = player_lookup_defmid$player,
-  ability_mean  = Delta_stats[, "Mean"],
-  ability_sd    = Delta_stats[, "SD"],
-  ability_lower = summary_quants_int[Delta_idx, "2.5%"],
-  ability_upper = summary_quants_int[Delta_idx, "97.5%"]
+  ability_mean  = Delta_stats_int[, "Mean"],
+  ability_sd    = Delta_stats_int[, "SD"],
+  ability_lower = Delta_hpd_poi_int[, "lower"],
+  ability_upper = Delta_hpd_poi_int[, "upper"]
 )
 
 View(player_table_poisson_int)
 
-# traceplots
-plot(samples_int_poi)
 
 
 
 #extracts posterior for latent player ability
-Delta_stats[, ]
+Delta_stats_int[, ]
 
 # checking for convergence
 
@@ -197,6 +218,15 @@ gd_uni_int <- gelman.diag(samples_int_poi, autoburnin = FALSE, multivariate = FA
 max_psrf <- max(gd_uni_int$psrf[, "Point est."], na.rm = TRUE)
 max_psrf
 
+psrf <- as.data.frame(gd_uni_int$psrf)        
+psrf$param <- rownames(psrf)
+
+# 1) Which parameters exceed 1.05 R-hat?
+bad_point <- psrf %>%
+  filter(`Point est.` > 1.05) %>%
+  arrange(desc(`Point est.`))
+
+bad_point
 
 
 # 3. ESS
@@ -210,9 +240,9 @@ gelman.diag(HakimiPoisInt)
 geweke.diag(HakimiPoisInt)
 effectiveSize(HakimiPoisInt)
 
-AmrabatPoisInt <- samples_int_poi[, "Delta[212]"]
+AmrabatPoisInt <- samples_int_poi[, "Delta[213]"]
 heidel.diag(AmrabatPoisInt)
-plot(AmrabatPoisInt, main = expression("Plot for " * Delta[212] * " (Sofyan Amrabat)"))
+plot(AmrabatPoisInt, main = expression("Plot for " * Delta[213] * " (Sofyan Amrabat)"))
 gelman.diag(AmrabatPoisInt)
 geweke.diag(AmrabatPoisInt)
 effectiveSize(AmrabatPoisInt)
@@ -232,42 +262,60 @@ S_int <- as.matrix(samples_int_poi)
 
 # split into player effects, each column is a defender, each row a posterior draw
 Delta_draws_int <- S_int[, grep("^Delta\\[", colnames(S_int)), drop = FALSE]
-team_draws_int  <- S_int[, grep("^lambda_team_int\\[", colnames(S_int)), drop = FALSE]
-opp_draws_int   <- S_int[, grep("^lambda_opp_att\\[", colnames(S_int)), drop = FALSE]
+team_draws_int  <- S_int[, grep("^lambda_e\\[", colnames(S_int)), drop = FALSE]
+oppteam_draws_int   <- S_int[, grep("^lambda_Edive\\[", colnames(S_int)), drop = FALSE]
 
 # player and team ids + minutes for defenders
 pid  <- df_defmid$defmid_player_id
 tid  <- df_defmid$team_id
-mins <- df_defmid$minutes_90
+tau      <- df_defmid$tau
+tau_star <- df_defmid$tau_star
+
 
 # matrix mult between posterior draw and opponent parameterto obtain opponent contribution
-opp_sum_draws_int <- opp_draws_int %*% t(delta_defmid)
+opp_sum_draws_int <- oppteam_draws_int %*% t(delta_defmid)
 
 # build eta for each posterior draw and observation
 # we add attacking opponent strength because the more attacks the more chance
 # of interceptions by defenders
-eta_draws_int <- Delta_draws_int[, pid, drop = FALSE] +
-  team_draws_int[, tid, drop = FALSE] + opp_sum_draws_int
+log_eta_draws <- Delta_draws_int[, pid, drop = FALSE] +
+  sweep(team_draws_int[, tid, drop = FALSE], 2, tau, `*`) -
+  sweep(opp_sum_draws_int, 2, tau_star, `*`)
+
+eta_draws_int <- exp(log_eta_draws)
 
 # expected interceptions per observation
-# achieved by mutiplying exp(eta) by minutes for exposure
-mu_draws_int <- sweep(exp(eta_draws_int), 2, mins, `*`)
+mu_draws_int <- sweep(eta_draws_int, 2, tau, `*`) 
+
 
 # total expected interceptions over tournament per defender/midfielder
-N_players_defmid <- max(df_defmid$defmid_player_id)
+N_players_int <- data_jags_int$N_players
 
 #posterior distributions for posterior draws for each defender
-mu_player_draws_int <- sapply(1:N_players_defmid, function(p) {
+mu_player_draws_int <- sapply(1:N_players_int, function(p) {
   cols <- which(pid == p)
   rowSums(mu_draws_int[, cols, drop = FALSE])
 })
 
 # summarise posterior per defender
-player_pred_total_int <- data.frame(
+# player_pred_total_int <- data.frame(
+#  player = player_lookup_defmid$player,
+#  pred_int_total_mean  = apply(mu_player_draws_int, 2, mean),
+# pred_int_total_lower = apply(mu_player_draws_int, 2, quantile, probs = 0.025),
+#  pred_int_total_upper = apply(mu_player_draws_int, 2, quantile, probs = 0.975)
+# 
+
+# summarise posterior per player using 95% HPD intervals
+hpd_pred_int_poi <- t(sapply(1:ncol(mu_player_draws_int), function(j) {
+  hpd <- HPDinterval(as.mcmc(mu_player_draws_int[, j]), prob = 0.95)
+  c(lower = hpd[1, "lower"], upper = hpd[1, "upper"])
+}))
+
+player_pred_total_int_poi <- data.frame(
   player = player_lookup_defmid$player,
   pred_int_total_mean  = apply(mu_player_draws_int, 2, mean),
-  pred_int_total_lower = apply(mu_player_draws_int, 2, quantile, probs = 0.025),
-  pred_int_total_upper = apply(mu_player_draws_int, 2, quantile, probs = 0.975)
+  pred_int_total_lower = hpd_pred_int_poi[, "lower"],
+  pred_int_total_upper = hpd_pred_int_poi[, "upper"]
 )
 
 # observed totals + minutes totals for comparison
@@ -280,14 +328,14 @@ obs_totals_int <- df_defmid %>%
   )
 
 #join predicted and observed data
-player_pred_total_int <- player_pred_total_int %>%
-  mutate(defmid_player_id = 1:N_players_defmid) %>%
+player_pred_total_int_poi <- player_pred_total_int_poi %>%
+  mutate(defmid_player_id = 1:N_players_int) %>%
   left_join(obs_totals_int, by = "defmid_player_id") %>%
   arrange(desc(pred_int_total_mean))
 
 # compute overall model MAE and RMSE (single values for model)
-errors <- player_pred_total_int$obs_int_total - 
-  player_pred_total_int$pred_int_total_mean
+errors <- player_pred_total_int_poi$obs_int_total - 
+  player_pred_total_int_poi$pred_int_total_mean
 
 MAE_model_int_poi  <- mean(abs(errors))
 RMSE_model_int_poi <- sqrt(mean(errors^2))
@@ -295,7 +343,7 @@ RMSE_model_int_poi <- sqrt(mean(errors^2))
 MAE_model_int_poi
 RMSE_model_int_poi
 
-View(player_pred_total_int)
+View(player_pred_total_int_poi)
 
 # INTERCEPTIONS - NEGATIVE BINOMIAL
 
@@ -304,94 +352,95 @@ library(rjags)
 library(coda)
 
 
-# JAGS data
-data_jags_int_negbin <- list(
-  y_int     = df_defmid$interceptions,
-  minutes   = df_defmid$minutes_90,
-  player_id = df_defmid$defmid_player_id,
-  team_id   = df_defmid$team_id,
-  delta     = delta_defmid,
-  N         = nrow(df_defmid),
-  N_players = max(df_defmid$defmid_player_id),
-  N_teams   = ncol(delta_defmid)
-)
 
 # Centered NB model 
 model_nb_int <- "
 model {
-
-  # Player interception ability (defenders and midfielders) (centred)
+  
+  # Priors on player effects
   for (p in 1:N_players) {
-    Delta_raw[p] ~ dnorm(0, 1)
+    Delta_star[p] ~ dnorm(m, s)
+    #trick to sum-to-zero constraints
+    Delta[p] <- Delta_star[p] - mean(Delta_star[])
   }
-   mean_Delta <- mean(Delta_raw[]) 
-  for (p in 1:N_players) {
-    Delta[p] <- Delta_raw[p] - mean_Delta
-  }
-
-  # Team defense - interceptions (centred)
+  
+  # Priors on team effects
   for (k in 1:N_teams) {
-    team_int_raw[k] ~ dnorm(0, 1)
+    #  lambda_e_star[k] ~ dnorm(0, 0.0001) # like team effects in whitaker and baio and blangiardo
+    #  lambda_Edive_star[k] ~ dnorm(0, 0.0001) # like team effects in whitaker and baio and blangiardo
+    
+    lambda_e_star[k] ~ dnorm(mu.lambda_e, tau.lambda_e)  # like team effects in whitaker and baio and blangiardo
+    lambda_Edive_star[k] ~ dnorm(mu.lambda_Edive, tau.lambda_Edive) # like team effects in whitaker and baio and blangiardo
+    
+    # sum-to-zero constraints
+    lambda_e[k] <- lambda_e_star[k] - mean(lambda_e_star[])
+    lambda_Edive[k] <- lambda_Edive_star[k] - mean(lambda_Edive_star[])
   }
-  mean_team_int <- mean(team_int_raw[])
-  for (k in 1:N_teams) {
-    lambda_team_int[k] <- team_int_raw[k] - mean_team_int
-  }
-
-  # Opponent attacking quality (centered)
-  for (k in 1:N_teams) {
-    opp_att_raw[k] ~ dnorm(0, 1)
-  }
-  mean_opp_att <- mean(opp_att_raw[])
-  for (k in 1:N_teams) {
-    lambda_opp_att[k] <- opp_att_raw[k] - mean_opp_att
-  }
-
-  # Overdispersion parameter (Negative Binomial)
-  r ~ dgamma(0.01, 0.01)
-
+  
+  # baio and blangiardo impose sum-to-zero constraints to their team effects, so:
+  
   # Likelihood
   for (i in 1:N) {
     
-    # opponent sum
-    opponent_sum[i] <- inprod(lambda_opp_att[], delta[i,])
-
-    # linear predictor for interception rate
-    eta[i] <- Delta[player_id[i]] +
-              lambda_team_int[team_id[i]] +
-              opponent_sum[i]  #(stronger opponent attack quality, more interceptions for defending team, mention in thesis)
-
-    # exposure offset - account for minutes
-    log(mu[i]) <- log(minutes[i]) + eta[i]
-
-    # Negative binomial with mean mu[i]
-    p_nb[i] <- r / (r + mu[i])
-    y_int[i] ~ dnegbin(p_nb[i], r)
+    opp_sum[i] <- inprod(lambda_Edive[], delta[i,]) # total opponent ability
+    
+    log(eta[i]) <- Delta[player_id[i]] +
+      tau[i] * lambda_e[team_id[i]] -
+      tau_star[i] * opp_sum[i]
+    
+    mu[i] <- eta[i] * tau[i]
+    
+    p[i] <- r / (r + mu[i]) #  since jags needs the first element in dnegbin to be 
+    # a probability parameter we introduce p which is a probability parameter
+    # which uses mu. explain this
+    # The negative binomial model was specified in terms of the mean μ_i = η_i τ_i
+    # and dispersion parameter r. For implementation in JAGS, this was 
+    # reparameterised as p_i = r / (r + μ_i), since the dnegbin distribution
+    # is defined using a probability and size parameter.
+    
+    y_int[i] ~ dnegbin(p[i], r)
   }
-
+  # inspired by Baio and Blangiardo code, priors in the random effects
+  m~dnorm(0,0.0001)
+  s~dgamma(0.1,0.01) # controls spread of player effects
+  
+  # priors on the random effects
+  mu.lambda_e ~ dnorm(0,0.0001)
+  mu.lambda_Edive ~ dnorm(0,0.0001) # mean 0 with precision very small and weak, we do not 
+  # know anything about team effects apart from the fact that they 
+  # are around zero, but very weakly-informative
+  tau.lambda_e ~ dgamma(.01,.01)
+  tau.lambda_Edive ~ dgamma(.01,.01)
+  # priors are very broad, we let the data decide if teams are similar or different
+  
+  r ~ dgamma(.01,.01) # since r must be positive and controls overdispersion
 }
-"
+" 
 
 
 # 4) Fit NB model
 jags_model_int_nb <- jags.model(
   textConnection(model_nb_int),
-  data = data_jags_int_negbin,
+  data = data_jags_int,
   n.chains = 3,
-  n.adapt = 200 
+  n.adapt = 1000 
 )
 
-update(jags_model_int_nb, 1000) 
+update(jags_model_int_nb, 9000) 
 
-params_int_nb <- c("Delta", "lambda_team_int", "lambda_opp_att", "r")
+params_int_nb <- c(
+  "Delta", "lambda_e", "lambda_Edive",
+  "tau.lambda_e", "tau.lambda_Edive","r" # "mu.lambda_e", "mu.lambda_Edive","m", "s"
+)
+
 samples_int_nb <- coda.samples(
   jags_model_int_nb,
   variable.names = params_int_nb,
-  n.iter = 10000, 
+  n.iter = 40000, 
   thin = 1
 )
 
-# 5) Defender ability table (NB)
+# player ability: Neg Bin interceptions
 summary_stats_int_nb  <- summary(samples_int_nb)$statistics
 summary_quants_int_nb <- summary(samples_int_nb)$quantiles
 
@@ -403,12 +452,24 @@ player_lookup_defmid <- df_defmid %>%
   arrange(defmid_player_id)
 
 
+#player_table_nb_int <- data.frame(
+#  player        = player_lookup_defmid$player,
+#  ability_mean  = Delta_stats_nb[, "Mean"],
+#  ability_sd    = Delta_stats_nb[, "SD"],
+#  ability_lower = summary_quants_int_nb[Delta_idx_nb, "2.5%"],
+#  ability_upper = summary_quants_int_nb[Delta_idx_nb, "97.5%"]
+# )
+samples_int_nb_mcmc <- as.mcmc(as.matrix(samples_int_nb))
+
+Delta_hpd_nb_int <- HPDinterval(samples_int_nb_mcmc, prob = 0.95)
+Delta_hpd_nb_int <- Delta_hpd_nb_int[grep("^Delta\\[", rownames(Delta_hpd_nb_int)), ]
+
 player_table_nb_int <- data.frame(
   player        = player_lookup_defmid$player,
   ability_mean  = Delta_stats_nb[, "Mean"],
   ability_sd    = Delta_stats_nb[, "SD"],
-  ability_lower = summary_quants_int_nb[Delta_idx_nb, "2.5%"],
-  ability_upper = summary_quants_int_nb[Delta_idx_nb, "97.5%"]
+  ability_lower = Delta_hpd_nb_int[, "lower"],
+  ability_upper = Delta_hpd_nb_int[, "upper"]
 )
 
 View(player_table_nb_int)
@@ -442,9 +503,9 @@ geweke.diag(HakimiNBInt)
 effectiveSize(HakimiNBInt)
 
 # Negative Binomial model: Sofyan Amrabat
-AmrabatNBInt <- samples_int_nb[, "Delta[212]"]
+AmrabatNBInt <- samples_int_nb[, "Delta[213]"]
 heidel.diag(AmrabatNBInt)
-plot(AmrabatNBInt, main = expression("Plot for " * Delta[212] * " (Sofyan Amrabat)"))
+plot(AmrabatNBInt, main = expression("Plot for " * Delta[213] * " (Sofyan Amrabat)"))
 gelman.diag(AmrabatNBInt)
 geweke.diag(AmrabatNBInt)
 effectiveSize(AmrabatNBInt)
@@ -460,42 +521,61 @@ S_int_nb <- as.matrix(samples_int_nb)
 
 # split into parameter blocks (each row is a posterior draw)
 Delta_draws_int_nb <- S_int_nb[, grep("^Delta\\[", colnames(S_int_nb)), drop = FALSE]
-team_draws_int_nb  <- S_int_nb[, grep("^lambda_team_int\\[", colnames(S_int_nb)), drop = FALSE]
-opp_draws_int_nb   <- S_int_nb[, grep("^lambda_opp_att\\[", colnames(S_int_nb)), drop = FALSE]
+team_draws_int_nb  <- S_int_nb[, grep("^lambda_e\\[", colnames(S_int_nb)), drop = FALSE]
+oppteam_draws_int_nb   <- S_int_nb[, grep("^lambda_Edive\\[", colnames(S_int_nb)), drop = FALSE]
 r_draws_int_nb     <- S_int_nb[, "r"]  
 
 # player and team ids + minutes for defenders
 pid  <- df_defmid$defmid_player_id
 tid  <- df_defmid$team_id
-mins <- df_defmid$minutes_90
+tau      <- df_defmid$tau
+tau_star <- df_defmid$tau_star
+
 
 # matrix mult, posterior draws x opponent design -> opponent contribution per obs
-opp_sum_draws_int_nb <- opp_draws_int_nb %*% t(delta_defmid)
+opp_sum_draws_int_nb <- oppteam_draws_int_nb %*% t(delta_defmid)
 
 # build eta for each posterior draw and observation
-# add opponent attacking strength: more attacks -> more interception opportunities
-eta_draws_int_nb <- Delta_draws_int_nb[, pid, drop = FALSE] +
-  team_draws_int_nb[, tid, drop = FALSE] +
-  opp_sum_draws_int_nb
+# we add attacking opponent strength because the more attacks the more chance
+# of interceptions by defenders
+log_eta_draws <- Delta_draws_int_nb[, pid, drop = FALSE] +
+  sweep(team_draws_int_nb[, tid, drop = FALSE], 2, tau, `*`) -
+  sweep(opp_sum_draws_int_nb, 2, tau_star, `*`)
+
+eta_draws_int_nb <- exp(log_eta_draws)
+
 
 # expected interceptions per observation (NB mean is mu = exp(eta)*exposure)
-mu_draws_int_nb <- sweep(exp(eta_draws_int_nb), 2, mins, `*`)
+mu_draws_int_nb <- sweep(eta_draws_int_nb, 2, tau, `*`) 
 
 # total expected interceptions over tournament per defender
-N_players_defmid <- max(df_defmid$defmid_player_id)
+N_players_int <- data_jags_int$N_players
 
 # posterior distribution of tournament totals for each defender (sum across their obs)
-mu_player_draws_int_nb <- sapply(1:N_players_defmid, function(p) {
+mu_player_draws_int_nb <- sapply(1:N_players_int, function(p) {
   cols <- which(pid == p)
   rowSums(mu_draws_int_nb[, cols, drop = FALSE])
 })
 
 # summarise posterior per defender
+# player_pred_total_int_nb <- data.frame(
+#  player = player_lookup_defmid$player,
+#  pred_int_total_mean  = apply(mu_player_draws_int_nb, 2, mean),
+#  pred_int_total_lower = apply(mu_player_draws_int_nb, 2, quantile, probs = 0.025),
+#  pred_int_total_upper = apply(mu_player_draws_int_nb, 2, quantile, probs = 0.975)
+# )
+
+# summarise posterior per defender using 95% HPD intervals
+hpd_pred_int_nb <- t(sapply(1:ncol(mu_player_draws_int_nb), function(j) {
+  hpd <- HPDinterval(as.mcmc(mu_player_draws_int_nb[, j]), prob = 0.95)
+  c(lower = hpd[1, "lower"], upper = hpd[1, "upper"])
+}))
+
 player_pred_total_int_nb <- data.frame(
   player = player_lookup_defmid$player,
   pred_int_total_mean  = apply(mu_player_draws_int_nb, 2, mean),
-  pred_int_total_lower = apply(mu_player_draws_int_nb, 2, quantile, probs = 0.025),
-  pred_int_total_upper = apply(mu_player_draws_int_nb, 2, quantile, probs = 0.975)
+  pred_int_total_lower = hpd_pred_int_nb[, "lower"],
+  pred_int_total_upper = hpd_pred_int_nb[, "upper"]
 )
 
 # observed totals + minutes totals for comparison
@@ -509,7 +589,7 @@ obs_totals_int <- df_defmid %>%
 
 # join predicted and observed data
 player_pred_total_int_nb <- player_pred_total_int_nb %>%
-  mutate(defmid_player_id = 1:N_players_defmid) %>%
+  mutate(defmid_player_id = 1:N_players_int) %>%
   left_join(obs_totals_int, by = "defmid_player_id") %>%
   arrange(desc(pred_int_total_mean))
 

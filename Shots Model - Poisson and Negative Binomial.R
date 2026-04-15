@@ -181,7 +181,7 @@ jags_model <- jags.model(
   n.adapt = 1000
 )
 
-update(jags_model, 1600) # account for burn-in
+update(jags_model, 6000) # account for burn-in
 
  # params_shots_pois <- c("Delta", "lambda_e", "lambda_Edive") # , "mu")
 # params_shots_pois <- c("Delta", "Delta_star", "lambda_e", "lambda_Edive", "m", "s")
@@ -190,7 +190,7 @@ params_shots_pois <- c(
   "mu.lambda_e", "mu.lambda_Edive", "tau.lambda_e", "tau.lambda_Edive","m", "s"
 )
 
-samples_shots_pois <- coda.samples(jags_model, variable.names = params_shots_pois, n.iter = 10000, thin = 1)
+samples_shots_pois <- coda.samples(jags_model, variable.names = params_shots_pois, n.iter = 30000, thin = 1)
 
 
 
@@ -203,12 +203,25 @@ Delta_stats <- sum_stats_poi[Delta_idx, ]
 
 player_names_shots <- player_lookup_attmid$player#levels(factor(df_shots$player))
 
+# player_table_shots_poi <- data.frame(
+ # player        = player_names_shots,
+#  ability_mean  = Delta_stats[, "Mean"],
+ # ability_sd    = Delta_stats[, "SD"],
+  #ability_lower = sum_quants_poi[Delta_idx, "2.5%"],
+  #ability_upper = sum_quants_poi[Delta_idx, "97.5%"]
+# )
+
+samples_shots_pois_mcmc <- as.mcmc(as.matrix(samples_shots_pois)) # combine all chains into one
+
+Delta_hpd <- HPDinterval(samples_shots_pois_mcmc, prob = 0.95)
+Delta_hpd <- Delta_hpd[grep("^Delta\\[", rownames(Delta_hpd)), ]
+
 player_table_shots_poi <- data.frame(
   player        = player_names_shots,
   ability_mean  = Delta_stats[, "Mean"],
   ability_sd    = Delta_stats[, "SD"],
-  ability_lower = sum_quants_poi[Delta_idx, "2.5%"],
-  ability_upper = sum_quants_poi[Delta_idx, "97.5%"]
+  ability_lower = Delta_hpd[, "lower"],
+  ability_upper = Delta_hpd[, "upper"]
 )
 
 View(player_table_shots_poi)
@@ -238,14 +251,15 @@ geweke.plot(samples_shots_pois)
 #5) Traceplot:
 plot(samples_shots_pois)
 
-#Amrabat 103, Ronaldo 113
+#Amrabat 103, Ronaldo 113, mbappe 56
 
-RonaldoPoisShots<- samples_shots_pois[, "Delta[113]"]
-heidel.diag(RonaldoPoisShots)
-plot(RonaldoPoisShots, main = expression("Plot for " * Delta[113] * " (Cristiano Ronaldo)"))
-gelman.diag(RonaldoPoisShots)
-geweke.diag(RonaldoPoisShots)
-effectiveSize(RonaldoPoisShots)
+MbappePoisShots <- samples_shots_pois[, "Delta[56]"]
+
+heidel.diag(MbappePoisShots)
+plot(MbappePoisShots, main = expression("Plot for " * Delta[56] * " (Kylian Mbappé)"))
+gelman.diag(MbappePoisShots)
+geweke.diag(MbappePoisShots)
+effectiveSize(MbappePoisShots)
 
 AmrabatPoisShots <- samples_shots_pois[, "Delta[103]"]
 heidel.diag(AmrabatPoisShots)
@@ -301,11 +315,23 @@ mu_player_draws_shots <- sapply(1:N_players_shots, function(p) {
 })
 
 # summarise posterior per player
+ #player_pred_total_shots_poi <- data.frame(
+#  player = player_names_shots,
+#  pred_shots_total_mean  = apply(mu_player_draws_shots, 2, mean),
+#  pred_shots_total_lower = apply(mu_player_draws_shots, 2, quantile, probs = 0.025),
+#  pred_shots_total_upper = apply(mu_player_draws_shots, 2, quantile, probs = 0.975)
+# )
+# summarise posterior per player using 95% HPD intervals
+hpd_pred_shots <- t(sapply(1:ncol(mu_player_draws_shots), function(j) {
+  hpd <- HPDinterval(as.mcmc(mu_player_draws_shots[, j]), prob = 0.95)
+  c(lower = hpd[1, "lower"], upper = hpd[1, "upper"])
+}))
+
 player_pred_total_shots_poi <- data.frame(
   player = player_names_shots,
   pred_shots_total_mean  = apply(mu_player_draws_shots, 2, mean),
-  pred_shots_total_lower = apply(mu_player_draws_shots, 2, quantile, probs = 0.025),
-  pred_shots_total_upper = apply(mu_player_draws_shots, 2, quantile, probs = 0.975)
+  pred_shots_total_lower = hpd_pred_shots[, "lower"],
+  pred_shots_total_upper = hpd_pred_shots[, "upper"]
 )
 
 # observed totals + minutes totals for comparison
@@ -317,16 +343,13 @@ obs_shots_total <- df_shots %>%
     .groups = "drop"
   )
 
-
-
 # join predicted and observed data + overall RMSE/MAE
 player_pred_total_shots_poi <- player_pred_total_shots_poi %>%
   mutate(shot_player_id = 1:N_players_shots) %>%
   left_join(obs_shots_total, by = "shot_player_id") %>%
   arrange(desc(pred_shots_total_mean)) 
-  
-  
-  # compute overall model MAE and RMSE (single values for model)
+
+# compute overall model MAE and RMSE (single values for model)
 errors_shots_poi <- player_pred_total_shots_poi$obs_shots_total - 
   player_pred_total_shots_poi$pred_shots_total_mean
 
@@ -410,7 +433,7 @@ jags_model_shots_nb <- jags.model(
 )
 
 
-update(jags_model_shots_nb, 1500)
+update(jags_model_shots_nb, 6000)
 
 params_shots_nb <- c(
   "Delta", "lambda_e", "lambda_Edive",
@@ -420,7 +443,7 @@ params_shots_nb <- c(
 samples_shots_nb <- coda.samples(
   jags_model_shots_nb,
   variable.names = params_shots_nb,
-  n.iter = 10000, 
+  n.iter = 30000, 
   thin = 1
 )
 
@@ -428,15 +451,20 @@ samples_shots_nb <- coda.samples(
 sum_stats_nb <- summary(samples_shots_nb)$statistics
 sum_quants_nb <- summary(samples_shots_nb)$quantiles
 
+samples_shots_nb_mcmc <- as.mcmc(as.matrix(samples_shots_nb))
+
 Delta_idx_nb <- grep("^Delta\\[", rownames(sum_stats_nb))
 Delta_stats_nb <- sum_stats_nb[Delta_idx_nb, ]
+
+Delta_hpd_shots_nb <- HPDinterval(samples_shots_nb_mcmc, prob = 0.95)
+Delta_hpd_shots_nb <- Delta_hpd_shots_nb[grep("^Delta\\[", rownames(Delta_hpd_shots_nb)), ]
 
 player_table_shots_nb <- data.frame(
   player        = player_names_shots,
   ability_mean  = Delta_stats_nb[, "Mean"],
   ability_sd    = Delta_stats_nb[, "SD"],
-  ability_lower = sum_quants_nb[Delta_idx_nb, "2.5%"],
-  ability_upper = sum_quants_nb[Delta_idx_nb, "97.5%"]
+  ability_lower = Delta_hpd_shots_nb[, "lower"],
+  ability_upper = Delta_hpd_shots_nb[, "upper"]
 )
 
 View(player_table_shots_nb)
@@ -486,21 +514,24 @@ mu_player_total_draws_shots_nb <- sapply(1:N_players_shots, function(p) {
 })
 
 
-# summarise posterior per player
+# summarise posterior per player using 95% HPD intervals
+hpd_pred_shots_nb <- t(sapply(1:ncol(mu_player_total_draws_shots_nb), function(j) {
+  hpd <- HPDinterval(as.mcmc(mu_player_total_draws_shots_nb[, j]), prob = 0.95)
+  c(lower = hpd[1, "lower"], upper = hpd[1, "upper"])
+}))
+
 player_pred_total_shots_nb <- data.frame(
   player = player_names_shots,
   pred_shots_total_mean  = apply(mu_player_total_draws_shots_nb, 2, mean),
-  pred_shots_total_lower = apply(mu_player_total_draws_shots_nb, 2, quantile, probs = 0.025),
-  pred_shots_total_upper = apply(mu_player_total_draws_shots_nb, 2, quantile, probs = 0.975)
+  pred_shots_total_lower = hpd_pred_shots_nb[, "lower"],
+  pred_shots_total_upper = hpd_pred_shots_nb[, "upper"]
 )
-
 
 # join observed + RMSE/MAE
 player_pred_total_shots_nb <- player_pred_total_shots_nb %>%
   mutate(shot_player_id = 1:N_players_shots) %>%
   left_join(obs_shots_total, by = "shot_player_id") %>%
   arrange(desc(pred_shots_total_mean)) 
-
 
 # compute overall model MAE and RMSE (single values for model)
 errors_shots_nb <- player_pred_total_shots_nb$obs_shots_total - 
@@ -511,7 +542,6 @@ RMSE_model_shots_nb <- sqrt(mean(errors_shots_nb^2))
 
 MAE_model_shots_nb
 RMSE_model_shots_nb
-
 
 View(player_pred_total_shots_nb)
 
@@ -559,12 +589,13 @@ geweke.plot(samples_shots_nb)
 hw <- heidel.diag(samples_shots_nb)
 
 
-RonaldoNegBinShots <- samples_shots_nb[, "Delta[113]"]
-heidel.diag(RonaldoNegBinShots)
-plot(RonaldoNegBinShots, main = expression("Plot for " * Delta[113] * " (Cristiano Ronaldo)"))
-gelman.diag(RonaldoNegBinShots)
-geweke.diag(RonaldoNegBinShots)
-effectiveSize(RonaldoNegBinShots)
+MbappeNBGShots <- samples_shots_nb[, "Delta[56]"]
+
+heidel.diag(MbappeNBGShots)
+plot(MbappeNBGShots, main = expression("Plot for " * Delta[56] * " (Kylian Mbappé)"))
+gelman.diag(MbappeNBGShots)
+geweke.diag(MbappeNBGShots)
+effectiveSize(MbappeNBGShots)
 
 AmrabatNegBinShots <- samples_shots_nb[, "Delta[103]"]
 heidel.diag(AmrabatNegBinShots)
