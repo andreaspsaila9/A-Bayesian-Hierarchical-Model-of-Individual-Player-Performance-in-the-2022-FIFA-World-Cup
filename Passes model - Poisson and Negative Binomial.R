@@ -82,8 +82,8 @@ model {
 
   # Priors on team effects
   for (k in 1:N_teams) {
-  #  lambda_e_star[k] ~ dnorm(0, 0.0001) # like team effects in whitaker and baio and blangiardo
-  #  lambda_Edive_star[k] ~ dnorm(0, 0.0001) # like team effects in whitaker and baio and blangiardo
+  #  lambda_e_star[k] ~ dnorm(0, 0.01) # like team effects in whitaker and baio and blangiardo
+  #  lambda_Edive_star[k] ~ dnorm(0, 0.01) # like team effects in whitaker and baio and blangiardo
     
     lambda_e_star[k] ~ dnorm(mu.lambda_e, tau.lambda_e)  # like team effects in whitaker and baio and blangiardo
 lambda_Edive_star[k] ~ dnorm(mu.lambda_Edive, tau.lambda_Edive) # like team effects in whitaker and baio and blangiardo
@@ -107,16 +107,16 @@ lambda_Edive_star[k] ~ dnorm(mu.lambda_Edive, tau.lambda_Edive) # like team effe
                    tau_star[i] * opp_sum[i]
   }
   # inspired by Baio and Blangiardo code, priors in the random effects
-  m~dnorm(0,0.0001)
-  s~dgamma(0.1,0.01) # controls spread of player effects
+  m~dnorm(0,0.01)
+  s~dgamma(1,0.1) # controls spread of player effects
   
 # priors on the random effects
-mu.lambda_e ~ dnorm(0,0.0001)
-mu.lambda_Edive ~ dnorm(0,0.0001) # mean 0 with precision very small and weak, we do not 
+mu.lambda_e ~ dnorm(0,0.01)
+mu.lambda_Edive ~ dnorm(0,0.01) # mean 0 with precision very small and weak, we do not 
 # know anything about team effects apart from the fact that they 
 # are around zero, but very weakly-informative
-tau.lambda_e ~ dgamma(.01,.01)
-tau.lambda_Edive ~ dgamma(.01,.01)
+tau.lambda_e ~ dgamma(1,1)
+tau.lambda_Edive ~ dgamma(1,1)
 # priors are very broad, we let the data decide if teams are similar or different
 }
 "
@@ -129,10 +129,10 @@ jags_model <- jags.model(
   textConnection(model_pois_pass),
   data = data_jags_pass,
   n.chains = 3,
-  n.adapt = 1000
+  n.adapt = 5000
 )
 
-update(jags_model, 1600) # account for burn-in
+update(jags_model, 30000) # account for burn-in
 
 params_pass_pois <- c(
   "Delta", "lambda_e", "lambda_Edive",
@@ -140,7 +140,7 @@ params_pass_pois <- c(
 )
 
 
-samples_pass_pois <- coda.samples(jags_model, variable.names = params_pass_pois, n.iter = 10000, thin = 1)
+samples_pass_pois <- coda.samples(jags_model, variable.names = params_pass_pois, n.iter = 170000, thin = 1)
 
 
 
@@ -150,8 +150,8 @@ summary_stats <- summary(samples_pass_pois)$statistics
 summary_quants <- summary(samples_pass_pois)$quantiles
 
 # Identify row indices corresponding to player ability parameters (Deltas)
-Delta_idx <- grep("^Delta\\[", rownames(sum_stats_poi)) # delta indices
-Delta_stats <- sum_stats_poi[Delta_idx, ] #  Extract posterior summary statistics for player abilities
+Delta_idx <- grep("^Delta\\[", rownames(summary_stats)) # delta indices
+Delta_stats <- summary_stats[Delta_idx, ] #  Extract posterior summary statistics for player abilities
 
 player_lookup_pass <- df_model %>%
   distinct(player_id, player) %>%
@@ -303,13 +303,13 @@ obs_pass_totals <- df_model %>%
 
 
 
-player_pred_total_poi <- player_pred_total_poi %>%
+player_pred_total_pass_poi <- player_pred_total_pass_poi %>%
   mutate(player_id = 1:N_players_pass) %>%
   left_join(obs_pass_totals, by = "player_id") %>%
   arrange(desc(pred_pass_total_mean))
 
-errors_pass_poi <- player_pred_total_poi$obs_pass_total - 
-  player_pred_total_poi$pred_pass_total_mean
+errors_pass_poi <- player_pred_total_pass_poi$obs_pass_total - 
+  player_pred_total_pass_poi$pred_pass_total_mean
 
 MAE_model_pass_poi  <- mean(abs(errors_pass_poi))
 RMSE_model_pass_poi <- sqrt(mean(errors_pass_poi^2))
@@ -317,7 +317,7 @@ RMSE_model_pass_poi <- sqrt(mean(errors_pass_poi^2))
 MAE_model_pass_poi
 RMSE_model_pass_poi
 
-View(player_pred_total_poi)
+View(player_pred_total_pass_poi)
 
 
 # now the NEGATIVE BINOMIAL jags model is initiated with 3 parallel markov chains 
@@ -334,8 +334,8 @@ model {
 
   # Priors on team effects
   for (k in 1:N_teams) {
-  #  lambda_e_star[k] ~ dnorm(0, 0.0001) # like team effects in whitaker and baio and blangiardo
-  #  lambda_Edive_star[k] ~ dnorm(0, 0.0001) # like team effects in whitaker and baio and blangiardo
+  #  lambda_e_star[k] ~ dnorm(0, 0.1) # like team effects in whitaker and baio and blangiardo
+  #  lambda_Edive_star[k] ~ dnorm(0, 0.1) # like team effects in whitaker and baio and blangiardo
     
     lambda_e_star[k] ~ dnorm(mu.lambda_e, tau.lambda_e)  # like team effects in whitaker and baio and blangiardo
     lambda_Edive_star[k] ~ dnorm(mu.lambda_Edive, tau.lambda_Edive) # like team effects in whitaker and baio and blangiardo
@@ -369,19 +369,19 @@ model {
     y_pass[i] ~ dnegbin(p[i], r)
   }
   # inspired by Baio and Blangiardo code, priors in the random effects
-  m~dnorm(0,0.0001)
-  s~dgamma(0.1,0.01) # controls spread of player effects
+  m~dnorm(0,1)
+  s~dgamma(1,1) # controls spread of player effects
   
 # priors on the random effects
-mu.lambda_e ~ dnorm(0,0.0001)
-mu.lambda_Edive ~ dnorm(0,0.0001) # mean 0 with precision very small and weak, we do not 
+mu.lambda_e ~ dnorm(0,1)
+mu.lambda_Edive ~ dnorm(0,1) # mean 0 with precision very small and weak, we do not 
 # know anything about team effects apart from the fact that they 
 # are around zero, but very weakly-informative
-tau.lambda_e ~ dgamma(.01,.01)
-tau.lambda_Edive ~ dgamma(.01,.01)
+tau.lambda_e ~ dgamma(2,2)
+tau.lambda_Edive ~ dgamma(1,1)
 # priors are very broad, we let the data decide if teams are similar or different
 
-r ~ dgamma(.01,.01) # since r must be positive and controls overdispersion
+r ~ dgamma(1,1) # since r must be positive and controls overdispersion
 }
 " 
 
@@ -391,10 +391,10 @@ jags_model_nb <- jags.model(
   textConnection(model_nb_pass),
   data = data_jags_pass,
   n.chains = 3,
-  n.adapt = 1000
+  n.adapt = 2000
 )
 
-update(jags_model_nb, 1600) # account for burn-in # 2400
+update(jags_model_nb, 20000) # account for burn-in # 2400
 
 params_pass_nb <- c(
   "Delta", "lambda_e", "lambda_Edive",
@@ -402,7 +402,7 @@ params_pass_nb <- c(
 )
 
 
-samples_pass_nb <- coda.samples(jags_model_nb, variable.names = params_pass_nb, n.iter = 10000, thin = 1) # 16000
+samples_pass_nb <- coda.samples(jags_model_nb, variable.names = params_pass_nb, n.iter = 50000, thin = 1) # 16000
 
 # Get summary stats and quantiles for NB model
 summary_nb_stats  <- summary(samples_pass_nb)$statistics
@@ -443,6 +443,15 @@ gd_uni_pass_nb <- gelman.diag(samples_pass_nb, autoburnin = FALSE, multivariate 
 max_psrf_pass_nb <- max(gd_uni_pass_nb$psrf[, "Point est."], na.rm = TRUE)
 max_psrf_pass_nb
 
+psrf <- as.data.frame(gd_uni_pass_nb$psrf)        
+psrf$param <- rownames(psrf)
+
+# 1) Which parameters exceed 1.05 R hat?
+bad_point <- psrf %>%
+  filter(`Point est.` > 1.05) %>%
+  arrange(desc(`Point est.`))
+
+bad_point
 
 # 3. ESS
 ess_pass_nb <- effectiveSize(samples_pass_nb)
@@ -521,7 +530,7 @@ mu_player_draws_nb <- sapply(1:N_players_pass_nb, function(p) {
 })
 
 # summarise posterior per player
-player_pred_total_nb <- data.frame(
+player_pred_total_pass_nb <- data.frame(
   player = player_names,
   pred_pass_total_mean  = apply(mu_player_draws_nb, 2, mean),
   pred_pass_total_lower = apply(mu_player_draws_nb, 2, quantile, probs = 0.025),
@@ -537,15 +546,15 @@ obs_pass_totals_nb <- df_model %>%
     .groups = "drop"
   )
 
-player_pred_total_nb <- player_pred_total_nb %>%
+player_pred_total_pass_nb <- player_pred_total_pass_nb %>%
   mutate(player_id = 1:N_players_pass_nb) %>%
   left_join(obs_pass_totals_nb, by = "player_id") %>%
   arrange(desc(pred_pass_total_mean))
 
 
 # compute overall model MAE and RMSE (single values for model)
-errors_pass_nb <- player_pred_total_nb$obs_pass_totals_nb - 
-  player_pred_total_nb$pred_pass_total_mean
+errors_pass_nb <- player_pred_total_pass_nb$obs_pass_totals_nb - 
+  player_pred_total_pass_nb$pred_pass_total_mean
 
 MAE_model_pass_nb  <- mean(abs(errors_pass_nb))
 RMSE_model_pass_nb <- sqrt(mean(errors_pass_nb^2))
@@ -554,7 +563,7 @@ MAE_model_pass_nb
 RMSE_model_pass_nb 
 
 
-View(player_pred_total_nb)
+View(player_pred_total_pass_nb)
 
 load("my_workspace.RData")
 save.image("my_workspace.RData")
